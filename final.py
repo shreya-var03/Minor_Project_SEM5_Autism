@@ -1,7 +1,6 @@
 import numpy as np
 import requests
 from PIL import Image
-from io import BytesIO
 import cv2
 import os
 from scipy.io import wavfile
@@ -71,63 +70,44 @@ def classify_audio(sound_db, temp, humidity, uv, pm25):
 
 
 # ================== VISUAL INPUT ==================
-def load_image_from_url(url):
-    """Download image and return as numpy array"""
-    resp = requests.get(url)
-    img = Image.open(BytesIO(resp.content)).convert("RGB")
+def load_image_from_file(path):
+    """Load local image and return as numpy array"""
+    img = Image.open(path).convert("RGB")
     return np.array(img)
 
 
-def get_brightness(image_array):
-    gray = np.mean(image_array, axis=2)
-    return np.mean(gray)
+def classify_visual_features(img_array):
+    """Classify image as calm/crowded based on features"""
+    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
 
+    # 1. Edge density
+    edges = cv2.Canny(gray, 50, 150)
+    edge_density = np.sum(edges) / edges.size
 
-def get_color_temperature(image_array):
-    avg_r = np.mean(image_array[:, :, 0])
-    avg_b = np.mean(image_array[:, :, 2])
-    if avg_r > avg_b + 20:
-        return "Warm"
-    elif avg_b > avg_r + 20:
-        return "Cool"
+    # 2. Variance (high variance means lots of textures/objects)
+    variance = np.var(gray)
+
+    # 3. Brightness
+    brightness = np.mean(gray)
+
+    # Decide crowd vs calm
+    if edge_density > 20 or variance > 5000:  # tweak thresholds
+        visual_status = "Crowded"
+        visual_reasons = f"High edge density ({edge_density:.2f}) and variance ({variance:.2f}) → looks busy"
     else:
-        return "Neutral"
+        visual_status = "Calm"
+        visual_reasons = f"Low edge density ({edge_density:.2f}) and variance ({variance:.2f}) → looks calm"
 
+    # Color tone
+    avg_color = img_array.mean(axis=(0, 1))
+    if avg_color[2] > avg_color[1] and avg_color[2] > avg_color[0]:
+        color_tone = "Warm (reddish)"
+    elif avg_color[0] > avg_color[1]:
+        color_tone = "Cool (bluish)"
+    else:
+        color_tone = "Neutral"
 
-def get_saturation(image_array):
-    hsv = np.array(Image.fromarray(image_array).convert("HSV"))
-    return np.mean(hsv[:, :, 1])
-
-
-def get_edge_density(image_array):
-    gray = cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY)
-    edges = cv2.Canny(gray, 100, 200)
-    return np.sum(edges > 0) / edges.size
-
-
-def classify_visual_features(image_array):
-    brightness = get_brightness(image_array)
-    saturation = get_saturation(image_array)
-    edge_density = get_edge_density(image_array)
-    temp = get_color_temperature(image_array)
-
-    status, reasons = "Calm", []
-
-    if brightness > 200:
-        status, reasons = "Overload", ["Too Bright"]
-    elif brightness < 50:
-        reasons.append("Too Dark")
-
-    if saturation > 150:
-        if status == "Calm":
-            status = "Risky"
-        reasons.append("High Saturation / Strong Colors")
-
-    if edge_density > 0.1:
-        status = "Risky" if status == "Calm" else "Overload"
-        reasons.append("Crowded Scene (High Edge Density)")
-
-    return status, reasons, temp
+    return visual_status, visual_reasons, color_tone
 
 
 # ================== MAIN LOOP ==================
@@ -135,11 +115,15 @@ audio_folder = "audio_samples"  # put your .wav files here
 output_folder = "results"
 os.makedirs(output_folder, exist_ok=True)
 
-# Example image
-test_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3f/Fronalpstock_big.jpg/640px-Fronalpstock_big.jpg"
-img_array = load_image_from_url(test_url)
+# Example local image
+image_path = "img.jpg"  # change to your image filename
+img_array = load_image_from_file(image_path)
 visual_status, visual_reasons, color_tone = classify_visual_features(img_array)
 
+print("\n=== Processing Complete ===")
+print("Reports generated:\n")
+
+count = 1
 for filename in os.listdir(audio_folder):
     if filename.endswith(".wav"):
         filepath = os.path.join(audio_folder, filename)
@@ -165,14 +149,16 @@ for filename in os.listdir(audio_folder):
         report.append(">> VISUAL CLASSIFICATION")
         report.append(f"Status: {visual_status}")
         if visual_reasons:
-            report.append("Reasons: " + ", ".join(visual_reasons))
+            report.append("Reasons: " + visual_reasons)
         report.append(f"Color Tone: {color_tone}")
         report.append("========================================")
 
-        # Save to text file
+        # Save report
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        outpath = os.path.join(output_folder, f"{filename}_{timestamp}.txt")
-        with open(outpath, "w") as f:
+        outpath = os.path.join(output_folder, f"report_{count}_{timestamp}.txt")
+        with open(outpath, "w", encoding="utf-8") as f:
             f.write("\n".join(report))
 
-        print(f"Processed {filename} -> saved report at {outpath}")
+        # Clean print (no filenames)
+        print(f"✔ Report {count} saved")
+        count += 1
