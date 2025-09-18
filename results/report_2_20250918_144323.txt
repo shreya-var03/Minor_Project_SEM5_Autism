@@ -2,7 +2,9 @@
 File: 691543__ania635__rain_light_traffic_06.wav
 
 >> WEATHER INFO
-Weather: Partly cloudy, Temp: 27.3°C, Humidity: 45%, UV: 2.2, PM2.5: 31.776
+Weather: Mist, Temp: 12.1°C, Humidity: 100%, UV: 0.0, PM2.5: 33.613
+Status: Risky
+Reasons: High Humidity
 
 >> AUDIO CLASSIFICATION
 Sound Level: 30.78 dB
@@ -12,4 +14,7 @@ Status: Calm
 Status: Crowded
 Reasons: High edge density (32.29) and variance (1384.00) → looks busy
 Color Tone: Cool (bluish)
+
+>> OVERALL ENVIRONMENT STATUS
+Classification: Calm
 ========================================
