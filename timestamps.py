@@ -9,8 +9,16 @@ FRAME_RATE = 24
 WINDOW = 30
 AUDIO_SR = 22050
 
+# Convert seconds → HH:MM:SS
+def to_timestamp(sec):
+    h = int(sec // 3600)
+    m = int((sec % 3600) // 60)
+    s = int(sec % 60)
+    return f"{h:02d}:{m:02d}:{s:02d}", h, m, s
+
+
 # ======================================
-# AUDIO FEATURE EXTRACTOR
+# AUDIO FEATURE EXTRACTOR (Real timestamps)
 # ======================================
 def analyze_audio(file_path):
     try:
@@ -28,34 +36,24 @@ def analyze_audio(file_path):
         end = (seg + 1) * samples_per_win
         win = y[start:end]
 
+        start_sec = seg * WINDOW
+        end_sec = (seg + 1) * WINDOW
+
+        timestamp, hh, mm, ss = to_timestamp(start_sec)
+
         intensity = np.sqrt(np.mean(win ** 2))
-        spectral_centroid = librosa.feature.spectral_centroid(y=win, sr=sr).mean()
         spectral_flux = librosa.onset.onset_strength(y=win, sr=sr).mean()
         bandwidth = librosa.feature.spectral_bandwidth(y=win, sr=sr).mean()
-
-        harmonicity = librosa.effects.harmonic(win).mean()
-        onset_rate = librosa.onset.onset_detect(y=win, sr=sr).size
-        zcr = librosa.feature.zero_crossing_rate(win).mean()
-
-        pitches, mags = librosa.piptrack(y=win, sr=sr)
-        pitch_vals = pitches[pitches > 0]
-        pitch_mean = pitch_vals.mean() if len(pitch_vals) else 0
-        pitch_var = pitch_vals.std() if len(pitch_vals) else 0
-
-        # Simple reverb proxy
-        reverb = np.abs(win[-1000:].mean())
 
         risk = 1 if (intensity > 0.15 or spectral_flux > 1.5) else 0
 
         results.append({
-            "segment": seg + 1,
-            "start_time": seg * WINDOW,
-            "end_time": (seg + 1) * WINDOW,
+            "file": os.path.basename(file_path),
+            "timestamp": timestamp,
+            "hour": hh, "minute": mm, "second": ss,
             "audio_intensity": intensity,
-            "audio_spectral_flux": spectral_flux,
+            "audio_flux": spectral_flux,
             "audio_bandwidth": bandwidth,
-            "audio_pitch_mean": pitch_mean,
-            "audio_pitch_var": pitch_var,
             "audio_risk": risk
         })
 
@@ -63,7 +61,7 @@ def analyze_audio(file_path):
 
 
 # ======================================
-# VIDEO FEATURE EXTRACTOR
+# VIDEO FEATURE EXTRACTOR (Real timestamps)
 # ======================================
 def analyze_video(file_path):
     try:
@@ -79,8 +77,6 @@ def analyze_video(file_path):
     stream.thread_type = "AUTO"
 
     brightness, contrast, saturation, motion = [], [], [], []
-    scene_changes = []
-
     prev_frame = None
     frame_count = 0
 
@@ -98,10 +94,8 @@ def analyze_video(file_path):
         if prev_frame is not None:
             diff = np.mean(cv2.absdiff(gray, prev_frame))
             motion.append(diff)
-            scene_changes.append(1 if diff > 30 else 0)
         else:
             motion.append(0)
-            scene_changes.append(0)
 
         prev_frame = gray
 
@@ -111,6 +105,11 @@ def analyze_video(file_path):
     results = []
 
     for seg in range(total_segments):
+        start_sec = seg * WINDOW
+        end_sec = (seg + 1) * WINDOW
+
+        timestamp, hh, mm, ss = to_timestamp(start_sec)
+
         start_f = int(seg * WINDOW * FRAME_RATE)
         end_f = int((seg + 1) * WINDOW * FRAME_RATE)
 
@@ -118,19 +117,17 @@ def analyze_video(file_path):
         seg_contrast = np.mean(contrast[start_f:end_f])
         seg_sat = np.mean(saturation[start_f:end_f])
         seg_motion = np.mean(motion[start_f:end_f])
-        seg_scene = np.sum(scene_changes[start_f:end_f])
 
         risk = 1 if (seg_motion > 7 or seg_bright > 180) else 0
 
         results.append({
-            "segment": seg + 1,
-            "start_time": seg * WINDOW,
-            "end_time": (seg + 1) * WINDOW,
+            "file": os.path.basename(file_path),
+            "timestamp": timestamp,
+            "hour": hh, "minute": mm, "second": ss,
             "video_brightness": seg_bright,
             "video_contrast": seg_contrast,
             "video_saturation": seg_sat,
             "video_motion": seg_motion,
-            "video_scene_changes": seg_scene,
             "video_risk": risk
         })
 
@@ -138,7 +135,26 @@ def analyze_video(file_path):
 
 
 # ======================================
-# PROCESS FOLDERS (Independent)
+# PREDICT NEXT TIMESTAMP STATE
+# ======================================
+def predict_state(prev, current):
+    if prev == "Risky" and current == "Calm":
+        return "Likely Calm"
+    if prev == "Calm" and current == "Risky":
+        return "Likely Risky"
+    return current
+
+
+# Final environment output
+def final_environment(states):
+    last = states[-3:] if len(states) >= 3 else states
+    if last.count("Risky") >= 2:
+        return "Environment Likely Overloading"
+    return "Environment Likely Safe"
+
+
+# ======================================
+# PROCESS FOLDERS (Independent Processing)
 # ======================================
 def process_folders(audio_folder, video_folder, output_csv):
 
@@ -155,24 +171,37 @@ def process_folders(audio_folder, video_folder, output_csv):
     df_audio = pd.DataFrame(audio_rows)
     df_video = pd.DataFrame(video_rows)
 
-    # Merge based on segment number
-    df = pd.merge(df_audio, df_video, on=["segment", "start_time", "end_time"], how="outer")
+    # Merge using timestamp
+    df = pd.merge(df_audio, df_video,
+                  on=["timestamp", "hour", "minute", "second"],
+                  how="outer")
 
-    # =====================================
-    # MULTIMODAL OVERLOAD INDEX
-    # =====================================
-    df["MCOI"] = df[["audio_risk", "video_risk"]].sum(axis=1)
+    df = df.sort_values(by=["hour", "minute", "second"])
 
-    # =====================================
-    # OVERLOAD TIMELINE PREDICTION
-    # =====================================
-    df = df.sort_values(by="segment")
-    df["overload_prediction"] = (
-        (df["MCOI"].shift(1) == 2) & (df["MCOI"] == 2)
-    ).astype(int)
+    # Combined multimodal index
+    df["audio_risk"] = df["audio_risk"].fillna(0)
+    df["video_risk"] = df["video_risk"].fillna(0)
 
+    df["MCOI"] = df["audio_risk"] + df["video_risk"]
+
+    # State
+    df["state"] = df["MCOI"].apply(lambda x: "Risky" if x >= 2 else "Calm")
+
+    # Prediction
+    predictions = []
+    prev = "Calm"
+
+    for s in df["state"]:
+        predictions.append(predict_state(prev, s))
+        prev = s
+
+    df["prediction"] = predictions
+
+    # Save CSV
     df.to_csv(output_csv, index=False)
     print("\n[SAVED] :", output_csv)
+
+    print("\nFINAL ENVIRONMENT OUTCOME →", final_environment(list(df["state"])))
 
 
 # ======================================
