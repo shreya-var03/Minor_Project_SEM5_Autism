@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import librosa
 import gradio as gr
+import requests   # << ADDED for weather API
 
 # ===========================================================
 # CONFIG
@@ -12,6 +13,39 @@ import gradio as gr
 FRAME_RATE = 24
 WINDOW = 30          # seconds per segment
 AUDIO_SR = 22050
+
+# ===========================================================
+# WEATHER API FUNCTION
+# ===========================================================
+def get_weather():
+    API_KEY = "5b4ce54a13604a8795e105427252108"
+    CITY = "Delhi"
+
+    url = f"http://api.weatherapi.com/v1/current.json?key={API_KEY}&q={CITY}&aqi=yes"
+    try:
+        response = requests.get(url).json()
+    except:
+        return "Could not fetch WeatherAPI response."
+
+    if "current" not in response:
+        return f"WeatherAPI Error: {response}"
+
+    current = response["current"]
+    temp = current["temp_c"]
+    humidity = current["humidity"]
+    uv = current["uv"]
+    condition = current["condition"]["text"]
+    air_quality = current.get("air_quality", {})
+    pm25 = air_quality.get("pm2_5", 0)
+
+    weather_info = (
+        f"Weather: **{condition}**, "
+        f"Temp: **{temp}°C**, "
+        f"Humidity: **{humidity}%**, "
+        f"UV Index: **{uv}**, "
+        f"PM2.5: **{pm25}**"
+    )
+    return weather_info
 
 
 # ===========================================================
@@ -25,7 +59,7 @@ def to_timestamp(sec):
 
 
 # ===========================================================
-#  AUDIO ANALYSIS
+# AUDIO ANALYSIS
 # ===========================================================
 def analyze_audio(file_path):
     if file_path is None:
@@ -70,7 +104,7 @@ def analyze_audio(file_path):
 
 
 # ===========================================================
-#  VIDEO ANALYSIS
+# VIDEO ANALYSIS
 # ===========================================================
 def analyze_video(file_path):
     if file_path is None:
@@ -149,7 +183,7 @@ def analyze_video(file_path):
 
 
 # ===========================================================
-#  FACIAL EMOTION
+# FACIAL EMOTION
 # ===========================================================
 def mouth_openness(mouth_rect, face_h):
     (mx, my, mw, mh) = mouth_rect
@@ -216,28 +250,25 @@ def analyze_face_emotion(image_path):
 
 
 # ===========================================================
-#  PIPELINE FOR FRONTEND
+# PIPELINE FOR FRONTEND
 # ===========================================================
 def _get_path(x):
-    """
-    Gradio sometimes returns a plain string path, sometimes a dict.
-    This helper makes sure we ALWAYS pass a string path to our analyzers.
-    """
     if x is None:
         return None
     if isinstance(x, str):
         return x
     if isinstance(x, dict):
-        # common keys across gradio versions
         return x.get("name") or x.get("filepath") or x.get("path")
     return None
 
 
 def run_multimodal(audio_file, video_file, image_file):
-    # Normalize inputs to filepaths
     audio_path = _get_path(audio_file)
     video_path = _get_path(video_file)
     image_path = _get_path(image_file)
+
+    # Weather data
+    weather_info = get_weather()
 
     audio_rows = analyze_audio(audio_path) if audio_path else []
     video_rows = analyze_video(video_path) if video_path else []
@@ -252,81 +283,65 @@ def run_multimodal(audio_file, video_file, image_file):
         elif df_video.empty:
             df = df_audio.copy()
         else:
-            df = pd.merge(
-                df_audio,
-                df_video,
-                on=["timestamp", "hour", "minute", "second"],
-                how="outer"
-            )
+            df = pd.merge(df_audio, df_video,
+                          on=["timestamp", "hour", "minute", "second"],
+                          how="outer")
 
         df = df.sort_values(by=["hour", "minute", "second"])
 
-        if "audio_risk" not in df.columns:
-            df["audio_risk"] = 0
-        if "video_risk" not in df.columns:
-            df["video_risk"] = 0
-
-        df["audio_risk"] = df["audio_risk"].fillna(0)
-        df["video_risk"] = df["video_risk"].fillna(0)
+        df["audio_risk"] = df.get("audio_risk", 0).fillna(0)
+        df["video_risk"] = df.get("video_risk", 0).fillna(0)
 
         df["MCOI"] = df["audio_risk"] + df["video_risk"]
         df["state"] = df["MCOI"].apply(lambda x: "Risky" if x >= 2 else "Calm")
 
         overall_state = df["state"].iloc[-1]
     else:
-        # No audio/video, but we might still have a face emotion
         df = pd.DataFrame()
         overall_state = "No data"
 
+    # Final summary block
     lines = []
-    lines.append("### Multimodal Analysis Result")
+    lines.append("## 🌤️ Weather Data")
+    lines.append(weather_info)
+    lines.append("")
+    lines.append("## 🎧🎥 Multimodal Analysis Result")
     lines.append(f"- **Overall Environment State**: `{overall_state}`")
     lines.append(f"- **Face Emotion**: `{emotion}` (score: `{emo_score}`)")
     lines.append("")
-    lines.append("**Details:**")
+    lines.append("### Segment Summary")
     lines.append(f"- Audio segments analysed: `{len(audio_rows)}`")
     lines.append(f"- Video segments analysed: `{len(video_rows)}`")
 
-    return "\n".join(lines), df
+    return "\n".join(lines), df, weather_info
 
 
 # ===========================================================
-#  GRADIO UI
+# GRADIO UI
 # ===========================================================
 with gr.Blocks() as demo:
-    gr.Markdown("# 🎧🎥 Multimodal Sensory Environment Analyzer")
-    gr.Markdown(
-        "Upload **audio**, **video**, and a **face image** or record directly "
-        "from your **microphone / webcam**."
-    )
+    gr.Markdown("# 🎧🎥 Multimodal Sensory Environment Analyzer + 🌤️ Weather API")
+    gr.Markdown("Upload audio, video & face image. Weather data is fetched automatically for Delhi.")
 
     with gr.Row():
-        audio_input = gr.Audio(
-            sources=["microphone", "upload"],
-            type="filepath",
-            label="Audio (mic / upload)"
-        )
-        video_input = gr.Video(
-            sources=["webcam", "upload"],
-            label="Video (webcam / upload)"
-        )
-        image_input = gr.Image(
-            sources=["webcam", "upload"],
-            type="filepath",
-            label="Face Image (webcam / upload)"
-        )
+        audio_input = gr.Audio(sources=["microphone", "upload"],
+                               type="filepath", label="Audio Input")
+        video_input = gr.Video(sources=["webcam", "upload"],
+                               label="Video Input")
+        image_input = gr.Image(sources=["webcam", "upload"],
+                               type="filepath", label="Face Image")
 
-    run_btn = gr.Button("Run Multimodal Analysis")
+    run_btn = gr.Button("Run Full Analysis")
 
-    summary_out = gr.Markdown(label="Summary")
-    table_out = gr.Dataframe(label="Segment-wise Results")
+    summary_out = gr.Markdown(label="Summary Output")
+    table_out = gr.Dataframe(label="Segment-wise Multimodal Table")
+    weather_out = gr.Markdown(label="Live Weather Info")
 
     run_btn.click(
         fn=run_multimodal,
         inputs=[audio_input, video_input, image_input],
-        outputs=[summary_out, table_out]
+        outputs=[summary_out, table_out, weather_out]
     )
 
 if __name__ == "__main__":
     demo.launch(share=True)
-
