@@ -5,12 +5,13 @@ import numpy as np
 import pandas as pd
 import librosa
 import math
+import requests
 
 # ===========================================================
 # CONFIG
 # ===========================================================
 FRAME_RATE = 24
-WINDOW = 30
+WINDOW = 30          # seconds per segment
 AUDIO_SR = 22050
 
 
@@ -134,7 +135,7 @@ def analyze_video(file_path):
 
 
 # ===========================================================
-#  FACIAL EMOTION DETECTION (Classical CV)
+# FACIAL EMOTION DETECTION (Classical CV)
 # ===========================================================
 def mouth_openness(mouth_rect, face_h):
     (mx, my, mw, mh) = mouth_rect
@@ -192,7 +193,56 @@ def analyze_face_emotion(image_path):
 
 
 # ===========================================================
-#  MAIN MULTIMODAL PIPELINE
+# WEATHER API + RISK ANALYSIS
+# ===========================================================
+def get_weather_data(city="Delhi"):
+    API_KEY = "e9a4e51fca8541ea83e140443252111"  # <-- Replace with your WeatherAPI.com key
+    url = f"http://api.weatherapi.com/v1/current.json?key={API_KEY}&q={city}&aqi=yes"
+
+    try:
+        response = requests.get(url).json()
+    except:
+        print("[ERROR] Weather API failed.")
+        return None
+
+    if "current" not in response:
+        print("[ERROR] Invalid weather response:", response)
+        return None
+
+    current = response["current"]
+    air_quality = current.get("air_quality", {})
+
+    weather = {
+        "temp": current["temp_c"],
+        "humidity": current["humidity"],
+        "uv": current["uv"],
+        "condition": current["condition"]["text"],
+        "pm25": air_quality.get("pm2_5", 0)
+    }
+
+    return weather
+
+
+def compute_weather_risk(w):
+    risk = 0
+
+    if w["temp"] > 35 or w["temp"] < 10:
+        risk += 1
+
+    if w["humidity"] > 75:
+        risk += 1
+
+    if w["uv"] >= 7:
+        risk += 1
+
+    if w["pm25"] > 80:
+        risk += 1
+
+    return risk
+
+
+# ===========================================================
+# MAIN MULTIMODAL PIPELINE
 # ===========================================================
 def process_multimodal(audio_folder, video_folder, image_folder, output_csv):
 
@@ -214,7 +264,7 @@ def process_multimodal(audio_folder, video_folder, image_folder, output_csv):
         if f.lower().endswith((".jpg", ".png", ".jpeg")):
             emotion, score = analyze_face_emotion(os.path.join(image_folder, f))
             image_rows.append({
-                "timestamp": f.split(".")[0],  # assume filenames = timestamp
+                "timestamp": f.split(".")[0],
                 "face_emotion": emotion,
                 "face_score": score
             })
@@ -223,28 +273,60 @@ def process_multimodal(audio_folder, video_folder, image_folder, output_csv):
     df_video = pd.DataFrame(video_rows)
     df_faces = pd.DataFrame(image_rows)
 
-    # Merge: audio + video on timestamp → then merge faces
+    # Merge audio + video
     df = pd.merge(df_audio, df_video,
                   on=["timestamp", "hour", "minute", "second"],
                   how="outer")
 
+    # Merge faces
     df = pd.merge(df, df_faces, on="timestamp", how="left")
 
     df = df.sort_values(by=["hour", "minute", "second"])
 
-    # Combined state
+    # Fill missing
     df["audio_risk"] = df["audio_risk"].fillna(0)
     df["video_risk"] = df["video_risk"].fillna(0)
-    df["MCOI"] = df["audio_risk"] + df["video_risk"]
 
-    df["state"] = df["MCOI"].apply(lambda x: "Risky" if x >= 2 else "Calm")
+    # ----------- WEATHER INTEGRATION -----------
+    weather = get_weather_data()
+
+    if weather:
+        weather_risk = compute_weather_risk(weather)
+        print("[WEATHER]", weather, "| Risk =", weather_risk)
+    else:
+        weather = {
+            "temp": None, "humidity": None,
+            "uv": None, "condition": None,
+            "pm25": None
+        }
+        weather_risk = 0
+
+    # Add weather to all rows
+    df["weather_temp"] = weather["temp"]
+    df["weather_humidity"] = weather["humidity"]
+    df["weather_uv"] = weather["uv"]
+    df["weather_condition"] = weather["condition"]
+    df["weather_pm25"] = weather["pm25"]
+    df["weather_risk"] = weather_risk
+
+    # ----------- OVERALL RISK -----------
+    df["total_risk"] = (
+        df["audio_risk"].astype(int)
+        + df["video_risk"].astype(int)
+        + df["weather_risk"].astype(int)
+    )
+
+    df["overall_state"] = df["total_risk"].apply(
+        lambda x: "Severe Overload" if x >= 3
+        else ("Moderate Overload" if x == 2 else "Calm")
+    )
 
     df.to_csv(output_csv, index=False)
-    print("\n[SAVED] :", output_csv)
+    print("\n[SAVED with WEATHER]:", output_csv)
 
 
 # ===========================================================
-#  RUN PIPELINE
+# RUN PIPELINE
 # ===========================================================
 process_multimodal(
     audio_folder="audio_samples",
